@@ -1,0 +1,76 @@
+training_scheme: 'unpaired'  # 'single' (stage 1) or 'unpaired' (stages 2 and 3)
+output_dir: 'output/debug'
+resume: ''
+log_wandb: false
+wandb_project: 'MPM-Reg'
+log_dir: ''
+
+
+data:
+  # each directory must contain train.csv and val.csv with a 'filepath' column
+  # (absolute paths to 3D volumes) and optionally a 'mask_filepath' column
+  data_dirs: ['/path/to/dataset']
+  downsample_factor: 1     # integer strided-slicing factor (2 for sub-millimetre data in the paper)
+  max_axis_size: null      # center-crop cap per axis (224 for whole-body data in the paper)
+  max_volume_size: 512     # subsampling cap per axis
+  norm_mode: 'minmax'      # 'minmax' or 'meanstd'
+  batch_size_train: 1
+  batch_size_val: 1
+
+
+augmentation:
+  brightness: false
+  heavy: false
+
+
+model:
+  patch_size: [16, 16, 16]
+  channels: 1
+  projection_dim: 1024     # encoder embed dim; if null, patch_size[0] * patch_size[1] * patch_size[2]
+  output_parameters: 3
+  encoder_num_heads: 12
+  decoder_num_heads: 6
+  encoder_depth: 12
+  decoder_depth: 8
+  compile: false
+
+
+training:
+  num_training_steps_per_epoch: 1000
+  max_total_train_steps: null
+  num_val_steps_per_epoch: 50
+  early_stopping: 100
+  epochs: 10000
+  start_epoch: 0
+  opt: 'adamw'
+  opt_eps: 1e-8
+  opt_betas: [0.9, 0.95]
+  momentum: 0.9
+  weight_decay: 0.05
+  weight_decay_end: null
+  lr: 0.00001
+  min_lr: 0.0001
+  warmup_lr: 0.00001
+  warmup_epochs: 20
+  warmup_steps: -1
+
+
+loss:
+  imgLoss_scale_factor: 1
+  smoothReg_scale_factor: 2
+  loss: 'mse'              # 'mse' (stage 1), 'mi' or 'lncc' (stages 2 and 3)
+  track_lncc: true
+  lncc_kernel_size: 9
+  track_mi: true
+
+
+misc:
+  seed: 0
+  num_workers: 16
+  auto_resume: false
+  device: 'cuda'
+
+
+single_image:
+  give_spatial_cues: true  # if false, decoder uses a learned mask token instead of perturbed spatial PEs
+  pertubation_factor: 1    # perturbation range = pertubation_factor * patch_size
