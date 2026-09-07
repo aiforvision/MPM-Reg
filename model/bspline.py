@@ -105,9 +105,7 @@ class BSpline(nn.Module):
         cz = torch.zeros_like(crtl_unpadded[0, 2]).index_put((crtl_pos_unpadded[..., 0], crtl_pos_unpadded[..., 1], crtl_pos_unpadded[..., 2]), control_displacements[..., 2])
         crtl_unpadded = torch.stack([cx, cy, cz], dim=0).unsqueeze(0)
 
-        ctrl = nn.functional.pad(crtl_unpadded, (1, 1, 1, 1, 1, 1), mode='reflect')
-
-        n_given = control_displacements.shape[1]
+        ctrl = nn.functional.pad(crtl_unpadded, (1, 1, 1, 1, 1, 1), mode='replicate')
 
         Z_out_padded = Z_out + stride_3[0]
         Y_out_padded = Y_out + stride_3[1]
