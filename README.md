@@ -1,5 +1,10 @@
 # MPM-Reg: Masked Position Modeling Aligns Vision Transformers With Image Registration
 
+> [!IMPORTANT]
+> **Model weights for Stage 1 and Stage 2 will be released soon.**
+>
+> Due to a recent change in UK Biobank (UKBB) regulations, model weights trained on UKBB data can no longer be published. As UKBB data forms a substantial part of our pre-training data, we are retraining the model without it. We expect to release the weights by December 1, 2026.
+
 Official PyTorch implementation of the paper "MPM-Reg: Masked Position Modeling Aligns Vision Transformers With Image Registration" (under review).
 
 Training proceeds in three stages:
