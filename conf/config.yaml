@@ -28,6 +28,7 @@ model:
   channels: 1
   projection_dim: 1024     # encoder embed dim; if null, patch_size[0] * patch_size[1] * patch_size[2]
   output_parameters: 3
+  head: 'spline'           # stages 2/3: 'spline' (B-spline, as in the paper) or 'dense' (MPM-Reg V2)
   encoder_num_heads: 12
   decoder_num_heads: 6
   encoder_depth: 12
@@ -53,12 +54,13 @@ training:
   warmup_lr: 0.00001
   warmup_epochs: 20
   warmup_steps: -1
+  lr_warmup_steps: 2000    # stages 2/3: linear lr warm-up from 0 when the optimizer starts fresh (0 = off)
 
 
 loss:
   imgLoss_scale_factor: 1
   smoothReg_scale_factor: 2
-  loss: 'mse'              # 'mse' (stage 1), 'mi' or 'lncc' (stages 2 and 3)
+  loss: 'mse'              # 'mse' (stage 1), 'mi', 'lncc' or 'mslncc' (stages 2 and 3; MPM-Reg V2: 'mslncc')
   track_lncc: true
   lncc_kernel_size: 9
   track_mi: true

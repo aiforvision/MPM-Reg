@@ -1,14 +1,22 @@
-"""Register a pair of 3D volumes with a trained MPM-Reg checkpoint (stage 2 or 3).
+"""Register a pair of 3D volumes with a trained MPM-Reg checkpoint (stage 2 or 3; B-spline model or MPM-Reg V2
+with the dense head, detected from the checkpoint).
 
 Warps the moving volume towards the fixed volume and writes the warped volume
 and the dense displacement field (in voxels) as NIfTI files.
 
 Example:
     python register.py --checkpoint checkpoint.pth --moving moving.nii.gz --fixed fixed.nii.gz --output_dir out/
+
+Optional test-time optimisation (TTO) on top of MPM-Reg with the anatomix authors' FireANTs registration
+(third-party code, see tto/anatomix_fireants.py and the README), e.g. for an MR (moving) to CT (fixed) pair:
+    python register.py ... --tto anatomix_fireants --tto_fixed_clip -450 450
+writes warped_moving_tto.nii.gz and flow_px_tto.nii.gz in addition.
 """
 
 import argparse
 import os
+import shlex
+import time
 
 import numpy as np
 import torch
@@ -36,13 +44,31 @@ def parse_args():
     parser.add_argument('--max_axis_size', type=int, default=None)
     parser.add_argument('--max_volume_size', type=int, default=256)
     parser.add_argument('--device', default='cuda')
+    # optional test-time optimisation (tto/anatomix_fireants.py; anatomix + FireANTs by their authors, see README)
+    parser.add_argument('--tto', default='none', choices=['none', 'anatomix_fireants'],
+                        help='refine the MPM-Reg field with the anatomix + FireANTs registration (default: off)')
+    parser.add_argument('--tto_start', default='mpmreg', choices=['mpmreg', 'identity'],
+                        help="start from MPM-Reg's field (default) or from the identity (the authors' method alone)")
+    parser.add_argument('--tto_recipe', default='default', choices=['default', 'abdomen'],
+                        help="the anatomix authors' settings: their CLI defaults or their abdominal MR->CT example")
+    parser.add_argument('--tto_fixed_clip', type=float, nargs=2, default=None, metavar=('LO', 'HI'),
+                        help='intensity clip of the fixed volume before min-max (anatomix: CT -450 450)')
+    parser.add_argument('--tto_moving_clip', type=float, nargs=2, default=None, metavar=('LO', 'HI'))
+    parser.add_argument('--tto_fixed_mask', default=None, help='optional foreground mask of the fixed volume')
+    parser.add_argument('--tto_moving_mask', default=None, help='optional foreground mask of the moving volume')
+    parser.add_argument('--tto_flags', default='',
+                        help="further anatomix-register flags, e.g. '--smooth-warp-sigma 1.0' (smoother) or 0.25 (more flexible)")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     device = torch.device(args.device)
+    torch.backends.cudnn.conv.fp32_precision = 'ieee'   # fp32 convolutions without TF32, as in training (see main.py)
 
+    checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
+    # MPM-Reg V2 checkpoints contain the dense head, the paper's checkpoints the B-spline model
+    head = 'dense' if any(k.startswith('dense_head.') for k in checkpoint['model']) else 'spline'
     model = mpm_reg.mpm_reg_registration_3D_bspline(
         patch_size=args.patch_size,
         projection_dim=args.projection_dim,
@@ -53,8 +79,8 @@ def main():
         decoder_num_heads=args.decoder_num_heads,
         encoder_depth=args.encoder_depth,
         decoder_depth=args.decoder_depth,
+        head=head,
     )
-    checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
     model.load_state_dict(checkpoint['model'], strict=True)
     print(f"Loaded checkpoint {args.checkpoint} (epoch {checkpoint.get('epoch', '?')})")
     model.to(device)
@@ -89,6 +115,9 @@ def main():
     pe_dec = pe_dec.unsqueeze(0).to(device)
     pos_b = pos.unsqueeze(0).to(device)
 
+    if device.type == 'cuda':
+        torch.cuda.synchronize(device)
+    t0 = time.time()
     with torch.no_grad():
         with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=device.type == 'cuda'):
             outputs, warped, flow, flow_px = model(
@@ -96,6 +125,10 @@ def main():
                 pe_enc_x=pe_enc, pe_dec_x=pe_dec, pe_dec_augm=pe_dec,
                 mask_target=mask_target, mask_source=mask_source,
                 positions=pos_b.clone(), regularization_positions=pos_b.clone())
+
+    if device.type == 'cuda':
+        torch.cuda.synchronize(device)
+    print(f'MPM-Reg: {time.time() - t0:.2f} s')
 
     os.makedirs(args.output_dir, exist_ok=True)
     affine = np.eye(4)
@@ -106,6 +139,28 @@ def main():
     nib.save(nib.Nifti1Image(fixed.numpy(), affine), os.path.join(args.output_dir, 'fixed_preprocessed.nii.gz'))
     nib.save(nib.Nifti1Image(flow_np, affine), os.path.join(args.output_dir, 'flow_px.nii.gz'))
     print(f"Saved warped volume and displacement field to {args.output_dir}")
+
+    if args.tto != 'none':
+        from tto.anatomix_fireants import refine, warp
+
+        def _raw(path):   # same geometry as the MPM-Reg input, raw intensities (the authors clip and normalise)
+            vol = preprocess_volume(
+                load_volume(path), patch_size=args.patch_size, norm_mode=None,
+                downsample_factor=args.downsample_factor, max_axis_size=args.max_axis_size,
+                max_volume_size=args.max_volume_size, path=path)
+            return vol[:common[0], :common[1], :common[2]]
+
+        u_tto, info = refine(
+            _raw(args.moving), _raw(args.fixed), u0=flow_px.float() if args.tto_start == 'mpmreg' else None,
+            moving_mask=_raw(args.tto_moving_mask) if args.tto_moving_mask else None,
+            fixed_mask=_raw(args.tto_fixed_mask) if args.tto_fixed_mask else None,
+            moving_clip=args.tto_moving_clip, fixed_clip=args.tto_fixed_clip, recipe=args.tto_recipe,
+            flags=shlex.split(args.tto_flags), device=device, work_dir=args.output_dir)
+        warped_tto = warp(moving_b.unsqueeze(1).float(), u_tto)
+        nib.save(nib.Nifti1Image(warped_tto.squeeze().cpu().numpy(), affine), os.path.join(args.output_dir, 'warped_moving_tto.nii.gz'))
+        nib.save(nib.Nifti1Image(u_tto.squeeze(0).cpu().numpy(), affine), os.path.join(args.output_dir, 'flow_px_tto.nii.gz'))
+        print(f"TTO (anatomix + FireANTs, start: {args.tto_start}): {info['time_s']:.1f} s, peak GPU memory "
+              f"{info['peak_mem_gb']:.1f} GB; saved warped_moving_tto / flow_px_tto to {args.output_dir}")
 
 
 if __name__ == "__main__":

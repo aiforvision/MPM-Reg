@@ -19,6 +19,7 @@ import wandb
 import torch.nn as nn
 
 from loss.smoothness_loss import SmoothnessLoss
+from loss.mslncc import MultiScaleLNCC
 from model import mpm_reg
 from model.model_utils import auto_load_model, save_model
 from data.dataset import RegistrationDataset, PretrainDataset
@@ -61,7 +62,10 @@ def main(cfg: DictConfig):
 
     # Set up device and random seed
     device = torch.device(cfg.misc.device)
-    cudnn.benchmark = True
+    # the dense head's conv sees a new volume shape every step: benchmarking it costs ~0.9 s instead of ~0.01 s per step
+    cudnn.benchmark = cfg.model.head != 'dense'
+    # fp32 convolutions in full precision: with TF32 (cuDNN default on A100) MPM-Reg V2 fine-tuning drifts to folding fields
+    cudnn.conv.fp32_precision = 'ieee'
     # a seed passed via ++training.seed overrides cfg.misc.seed
     training_seed = cfg.training.get('seed', None)
     if training_seed is not None:
@@ -83,6 +87,7 @@ def main(cfg: DictConfig):
             encoder_depth=cfg.model.encoder_depth,
             decoder_depth=cfg.model.decoder_depth,
             give_spatial_cues=cfg.single_image.give_spatial_cues,
+            head=cfg.model.head,
         )
     elif cfg.training_scheme == 'single':
         model = mpm_reg.mpm_reg_pretrain_3D(
@@ -120,7 +125,12 @@ def main(cfg: DictConfig):
     model.to(device)
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    optimizer = create_optimizer(cfg, model)
+    if cfg.model.head == 'dense':
+        # dense head in its own parameter groups at 10x the learning rate, as in the MPM-Reg V2 training
+        optimizer = create_optimizer(cfg, model, get_num_layer=lambda name: int(name.startswith('dense_head.')),
+                                     get_layer_scale=lambda layer: 10.0 if layer else 1.0)
+    else:
+        optimizer = create_optimizer(cfg, model)
     print("Model = %s" % str(model))
     print('number of params: {} M'.format(n_parameters / 1e6))
 
@@ -161,6 +171,13 @@ def main(cfg: DictConfig):
     lr_schedule_values = cosine_scheduler(
         cfg.training.lr, cfg.training.min_lr, cfg.training.epochs, num_training_steps_per_epoch,
         warmup_epochs=cfg.training.warmup_epochs, warmup_steps=cfg.training.warmup_steps, start_warmup_value=cfg.training.warmup_lr)
+    # stages 2/3: linear learning-rate warm-up from 0 when the optimizer starts fresh (start_epoch stays 0 unless an
+    # optimizer state was loaded; the released checkpoints contain none): at the full rate, a fresh Adam moves the
+    # field far from the checkpoint within a few steps
+    if cfg.training_scheme == 'unpaired' and cfg.training.start_epoch == 0 and cfg.training.lr_warmup_steps > 0:
+        n_warmup = min(cfg.training.lr_warmup_steps, len(lr_schedule_values))
+        lr_schedule_values[:n_warmup] *= np.linspace(0, 1, n_warmup)
+        print(f"Learning-rate warm-up from 0 over the first {n_warmup} steps (fresh optimizer)")
     if cfg.training.weight_decay_end is None:
         cfg.training.weight_decay_end = cfg.training.weight_decay
     wd_schedule_values = cosine_scheduler(
@@ -174,6 +191,8 @@ def main(cfg: DictConfig):
         loss_image = monai.losses.GlobalMutualInformationLoss(kernel_type='gaussian', num_bins=32)
     elif cfg.loss.loss == 'lncc':
         loss_image = monai.losses.LocalNormalizedCrossCorrelationLoss(spatial_dims=3, kernel_size=cfg.loss.lncc_kernel_size)
+    elif cfg.loss.loss == 'mslncc':
+        loss_image = MultiScaleLNCC()
     loss_smoothness = SmoothnessLoss()
 
     if cfg.loss.track_mi:

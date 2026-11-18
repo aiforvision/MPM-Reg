@@ -86,6 +86,16 @@ def auto_load_model(args, model, optimizer, loss_scaler):
 
     if args.resume:
         checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
+        # the checkpoint must match model.head: a trained dense head (MPM-Reg V2) must not be dropped; a checkpoint
+        # without one (B-spline stage 2 or stage 1) may start the dense head from its B-spline initialisation
+        ckpt_dense = any(k.startswith('dense_head.') for k in checkpoint['model'])
+        model_dense = hasattr(model, 'dense_head')
+        if ckpt_dense and not model_dense:
+            raise ValueError(f"Checkpoint {args.resume} is an MPM-Reg V2 checkpoint (dense head), but the model was "
+                             f"built without the dense head: set ++model.head=dense (with ++training_scheme=unpaired).")
+        if model_dense and not ckpt_dense:
+            print(f"Checkpoint {args.resume} has no dense head (B-spline or stage-1 checkpoint): "
+                  f"the dense head starts from its B-spline initialisation.")
         missing, unexpected = model.load_state_dict(checkpoint['model'], strict=False)
         if missing:
             print(f"Missing keys when loading checkpoint (expected for new layers): {missing}")

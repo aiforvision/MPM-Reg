@@ -1,0 +1,7 @@
+# Optional test-time optimisation (tto/anatomix_fireants.py): third-party code, installed unmodified from the
+# authors' repositories at the tested commits. Install into the same environment as requirements.txt.
+#   anatomix (MIT licence): https://github.com/neel-dey/anatomix
+#   FireANTs (Apache-2.0): https://github.com/rohitrango/fireants, the anatomix authors' fork https://github.com/neel-dey/FireANTs
+anatomix @ https://github.com/neel-dey/anatomix/archive/4c86aeeca5e4bf712d9e5775a01fadb37b30c13a.tar.gz
+# source archives of the commits (FireANTs' git repository has an SSH-only submodule that the package does not need)
+fireants @ https://github.com/neel-dey/FireANTs/archive/21ae072ac9c379b2c6b074b5ebc7ec5ea6e78da3.tar.gz

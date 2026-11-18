@@ -16,6 +16,7 @@ from functools import partial
 from model.blocks import Block, PatchEmbed
 from model.model_utils import PositionalEncoding_posEmb_nd
 from model.bspline import BSpline
+from model.dense_head import DenseHead
 from timm.models.layers import trunc_normal_ as __call_trunc_normal_
 
 
@@ -505,6 +506,53 @@ class PretrainVisionTransformer_img2img_torchInterpolation_bSpline(nn.Module):
         return x, x_augm, flow, flow_px
 
 
+class MPMRegDense(PretrainVisionTransformer_img2img_torchInterpolation_bSpline):
+    """MPM-Reg V2: the registration model above with the B-spline interpolation replaced by a learnable dense head
+    (model/dense_head.py). Same encoder, decoder, inputs and outputs (the first output holds the per-patch control
+    displacements instead of the predicted positions)."""
+    def __init__(self, n_extra=13, **kwargs):
+        super().__init__(**kwargs)
+        assert len(set(self.patch_size)) == 1, 'the dense head assumes cubic patches'
+        self.dense_head = DenseHead(self.patch_size[0], self.decoder.embed_dim, n_extra)
+
+    def tokens(self, x, x_augm, pe_enc_x, pe_dec_x, pe_dec_augm, mask_target, mask_source, positions):
+        """Encoder + decoder up to the position head, as in the parent's forward. Returns (N, decoder_embed_dim)."""
+        self.pos_embed = pe_dec_x
+        x_vis = self.encoder_to_decoder(self.encoder(x, x_augm, pe_enc_x, mask_target, mask_source, positions))
+        B, _, C = x_vis.shape
+        pos_emd_vis = self.pos_embed[mask_target].reshape(B, -1, C)
+        if self.give_spatial_cues:
+            pos_embed_masked = pe_dec_augm[mask_source].reshape(B, -1, C)
+        else:
+            pos_embed_masked = self.mask_token.expand(B, int(mask_source[0].sum()), -1)
+        n_masked = pos_embed_masked.shape[1]
+        t = x_vis + torch.cat([pos_emd_vis, pos_embed_masked], dim=1)
+        for blk in self.decoder.blocks:
+            t = blk(t)
+        return self.decoder.norm(t[:, -n_masked:])[0]
+
+    def forward(self, x, x_augm, pe_enc_x, pe_dec_x, pe_dec_augm, mask_target, mask_source, positions, regularization_positions):
+        B, D, H, W = x.shape
+        assert B == 1, 'batch size 1, as in the B-spline model'
+        self.img_size = [D, H, W]
+        s = self.patch_size[0]
+        grid = (D // s, H // s, W // s)
+        t = self.tokens(x, x_augm, pe_enc_x, pe_dec_x, pe_dec_augm, mask_target, mask_source, positions)
+
+        # fp32 from here on: the position head under autocast quantises positions near 256 voxels to 0.125 voxels
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            t = t.float()
+            pos = regularization_positions[0].float()
+            ctrl = pos - self.decoder.head(t) * pos.new_tensor(self.img_size)      # (N, 3), components (D, H, W)
+            field = self.dense_head(ctrl.T.reshape(3, *grid), t, grid)             # (3, D, H, W)
+
+            flow_px = field.permute(1, 2, 3, 0)[..., [2, 1, 0]][None]              # components (W, H, D) = grid_sample order
+            flow = flow_px / flow_px.new_tensor([W / 2, H / 2, D / 2])
+            base = F.affine_grid(torch.eye(3, 4, device=x.device)[None], (1, 1, D, H, W), align_corners=True)
+            warped = F.grid_sample(x[:, None].float(), base - flow, align_corners=True, padding_mode='border')
+        return ctrl[None], warped, flow, flow_px
+
+
 def mpm_reg_pretrain_3D(patch_size, projection_dim, channels, output_parameters, training_scheme, pretrained=False, encoder_num_heads=12, encoder_depth=12, decoder_num_heads=6, decoder_depth=4, give_spatial_cues=True, **kwargs):
     """MPM-Reg stage-1 model (single-image masked position modeling pre-training)."""
     encoder_embed_dim = patch_size[0]*patch_size[1]*patch_size[2] if projection_dim is None else projection_dim
@@ -536,12 +584,14 @@ def mpm_reg_pretrain_3D(patch_size, projection_dim, channels, output_parameters,
     return model
 
 
-def mpm_reg_registration_3D_bspline(patch_size, projection_dim, channels, output_parameters, training_scheme, pretrained=False, encoder_num_heads=12, decoder_num_heads=6, encoder_depth=12, decoder_depth=4, **kwargs):
-    """MPM-Reg stage-2/3 model (unpaired registration with B-spline interpolation)."""
+def mpm_reg_registration_3D_bspline(patch_size, projection_dim, channels, output_parameters, training_scheme, pretrained=False, encoder_num_heads=12, decoder_num_heads=6, encoder_depth=12, decoder_depth=4, head='spline', **kwargs):
+    """MPM-Reg stage-2/3 model (unpaired registration): head='spline' is the paper's B-spline interpolation,
+    head='dense' the learnable dense head of MPM-Reg V2."""
     encoder_embed_dim = patch_size[0]*patch_size[1]*patch_size[2] if projection_dim is None else projection_dim
-    print(f"Creating model with patch_size={patch_size}, channels={channels}, d_hidd={encoder_embed_dim}",)
+    print(f"Creating model with patch_size={patch_size}, channels={channels}, d_hidd={encoder_embed_dim}, head={head}",)
 
-    model = PretrainVisionTransformer_img2img_torchInterpolation_bSpline(
+    model_class = {'spline': PretrainVisionTransformer_img2img_torchInterpolation_bSpline, 'dense': MPMRegDense}[head]
+    model = model_class(
         patch_size=patch_size,
         encoder_embed_dim=encoder_embed_dim,
         encoder_depth=encoder_depth,
