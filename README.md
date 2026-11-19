@@ -147,6 +147,20 @@ augmentation/augmentation.py # brightness / heavy augmentation
 training/                    # stage engines + optimizer/scheduler utilities
 ```
 
+## Citation
+
+If you use MPM-Reg in your work, please cite our paper:
+
+```bibtex
+@article{karbole2026masked,
+  title={Masked Position Modeling as a Pre-Training Strategy for Foundational Deformable Image Registration Models},
+  author={Karbole, Wenke and Sideri-Lampretsa, Vasiliki and Qiu, Huaqi and Suk, Julian and Mildenberger, David and Brandt, Johannes and Zimmer, Veronika A and Scholl, Hendrik PN and Schmidt-Erfurth, Ursula and Sacu, Stefan and Bogunovi{\'c}, Hrvoje and Sivaprasad, Sobha and Lotery, Andrew and Rueckert, Daniel and Menten, Martin J},
+  journal={IEEE Transactions on Medical Imaging},
+  year={2026},
+  publisher={IEEE}
+}
+```
+
 ## Acknowledgements
 
 The model implementation is based on the BEiT, timm, DINO, DeiT and
